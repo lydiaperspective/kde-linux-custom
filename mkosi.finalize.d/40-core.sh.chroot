@@ -1,0 +1,219 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+# SPDX-FileCopyrightText: 2023 Harald Sitter <sitter@kde.org>
+
+set -ex
+
+userdel --remove --force builder || true
+passwd --delete root
+passwd --lock root
+
+if [ -f "$SRCDIR/.secure_files/gpg.public.key" ]; then # only useful and available for publishing branches
+    # Put our key into the systemd keyring
+    export GNUPGHOME="$SRCDIR/.secure_files/gpg"
+    KEYRING=/usr/lib/systemd/import-pubring.pgp
+    rm -rf "$GNUPGHOME"
+    mkdir "$GNUPGHOME"
+    rm -f "$KEYRING"
+    gpg --no-options --no-default-keyring --keyring="$KEYRING" --homedir="$GNUPGHOME" --import "$SRCDIR/.secure_files/gpg.public.key"
+
+    # TODO: Make sure the keyring is actually used. This notably broke in the past because of an upstream change.
+    # https://invent.kde.org/kde-linux/kde-linux/-/issues/199
+fi
+
+# Uninstall solaar and sane, but keep their udev rules.
+# This ensures that they stay up to date.
+UDEV_BACKUP_DIR=$(mktemp -d)
+pacman -Qlq solaar sane | grep '^/usr/lib/udev/' | xargs -r cp -a --parents -t "$UDEV_BACKUP_DIR"
+pacman -Rns --noconfirm solaar sane
+cp -a "$UDEV_BACKUP_DIR"/* /
+rm -rf "$UDEV_BACKUP_DIR"
+
+# De-initialize pacman
+rm -rf \
+    /etc/pacman.d/gnupg \
+    /.gnupg \
+    /var/cache/pacman \
+    /var/lib/pacman \
+    /var/log/pacman.log
+
+## Pacman being present confuses users into thinking they can use it to install packages.
+rm -f /usr/bin/pacman
+
+# No SUID elevation path; run0 only. sudo stays as a symlink to the unprivileged
+# shim, pkexec is dropped and covered by the command-not-found handler.
+# Both pam.d locations are listed because 99-etc.sh.chroot moves /etc/pam.d to
+# /usr/lib/pam.d afterwards.
+rm -rf \
+    /usr/bin/cvtsudoers \
+    /usr/bin/pkexec \
+    /usr/bin/sudo \
+    /usr/bin/sudoedit \
+    /usr/bin/sudoreplay \
+    /usr/bin/visudo \
+    /usr/lib/sudo \
+    /etc/pam.d/sudo \
+    /etc/pam.d/sudo-i \
+    /usr/lib/pam.d/sudo \
+    /usr/lib/pam.d/sudo-i \
+    /etc/sudoers \
+    /etc/sudoers.d \
+    /usr/share/man/man*/cvtsudoers* \
+    /usr/share/man/man*/pkexec* \
+    /usr/share/man/man*/sudo* \
+    /usr/share/man/man*/visudo* \
+    /usr/share/polkit-1/actions/org.freedesktop.policykit.exec.policy
+
+ln -sfv run0-sudo-shim /usr/bin/sudo
+
+if [ -e /usr/bin/pkexec ] || [ -u /usr/bin/sudo ]; then
+    echo "pkexec or SUID sudo still present" >&2
+    exit 1
+fi
+
+# Remove all excess things we don't want in the final image
+
+## locale-gen doesn't work because /usr is read-only. Removing it means calamares won't attempt to use it.
+rm -rf \
+    /etc/locale.gen \
+    /usr/bin/locale-gen
+
+## Development tools that aren't useful even for the development edition
+rm -rf \
+    /usr/bin/assistant \
+    /usr/bin/assistant-qt5 \
+    /usr/share/applications/assistant.desktop \
+    /usr/bin/designer \
+    /usr/bin/designer-qt5 \
+    /usr/share/applications/designer.desktop \
+    /usr/bin/linguist \
+    /usr/bin/linguist-qt5 \
+    /usr/share/applications/linguist.desktop \
+    /usr/bin/qdbusviewer \
+    /usr/bin/qdbusviewer-qt5 \
+    /usr/share/applications/qdbusviewer.desktop \
+    /usr/share/applications/qv4l2.desktop \
+    /usr/bin/qvidcap \
+    /usr/share/applications/qvidcap.desktop \
+
+# Development tools that are useful enough to pre-install, but that we
+# don't want made visible to the user until they ask for them. Don't
+# delete; just hide. The user can show them again with
+# `toggle-developer-mode`.
+# (audit once everything in plasma-sdk is on Flathub)
+echo "NoDisplay=true" | tee -a \
+    /usr/share/applications/GammaRay.desktop \
+    /usr/share/applications/org.kde.heaptrack.desktop \
+    /usr/share/applications/org.kde.plasma.lookandfeelexplorer.desktop \
+    /usr/share/applications/org.kde.plasma.themeexplorer.desktop \
+    /usr/share/applications/org.kde.plasmaengineexplorer.desktop \
+
+# Parts of plasma-sdk that are on Flathub now, so you can just get them from there
+# (once everything is on Flathub, we can stop building plasma-sdk, and remove these lines)
+rm -rf \
+    /usr/bin/iconexplorer \
+    /usr/lib/qt6/plugins/kf6/ktexteditor/iconexplorerplugin.so \
+    /usr/share/applications/org.kde.iconexplorer.desktop \
+    /usr/share/locale/*/LC_MESSAGES/iconexplorer.mo \
+    /usr/share/icons/hicolor/scalable/apps/org.kde.iconexplorer.svg
+
+## FFADO Mixer app that came along for the ride with FireWire audio support
+rm -rf \
+    /usr/bin/ffado-mixer \
+    /usr/lib/python3.13/site-packages/ffado/mixer \
+    /usr/share/applications/org.ffado.FfadoMixer.desktop \
+    /usr/share/icons/hicolor/64x64/apps/hi64-apps-ffado.png \
+    /usr/share/metainfo/org.ffado.FfadoMixer.metainfo.xml \
+
+# LSHW GUI app that came along for the ride with the CLi tool
+rm -rf \
+    /usr/share/applications/gtk-lshw.desktop \
+    /usr/bin/gtk-lshw \
+    /usr/share/lshw/artwork \
+    /usr/share/lshw/ui
+
+## Miscellaneous application entries that have zero value because we either have better stuff or they're for terminal applications
+rm -rf \
+    /usr/share/applications/avahi-discover.desktop \
+    /usr/share/applications/vim.desktop \
+    /usr/share/applications/htop.desktop \
+    /usr/share/applications/lstopo.desktop \
+    /usr/share/applications/bssh.desktop \
+    /usr/share/applications/bvnc.desktop \
+    /usr/share/applications/cups.desktop \
+    /etc/xdg/autostart/print-applet.desktop \
+    /usr/bin/system-config-printer-applet \
+    /usr/share/applications/system-config-printer.desktop \
+    /usr/share/applications/nvtop.desktop \
+    /usr/share/applications/stoken-gui-small.desktop \
+    /usr/share/applications/stoken-gui.desktop \
+    /usr/share/applications/cmake-gui.desktop \
+    /usr/share/applications/tuned-gui.desktop \
+
+## Remove local documentation for KDE apps; it's available online.
+rm -rf \
+    /usr/share/doc/
+
+## /boot is now the preferred mount point for systemd and BLS:
+## https://uapi-group.org/specifications/specs/boot_loader_specification/#mount-points
+## However, its content are no longer necessary, since we've already created our initrd.
+# shellcheck disable=SC2114
+rm -rf /boot/*
+
+## Don't expose any X11 sessions; we're all-in on Wayland.
+rm -rf /usr/share/xsessions/
+
+## Get rid of /usr/local for /opt/local
+rm -rf /usr/local
+
+# Prevent tuned from messing with the vm.swappiness parameter we already set
+sed --in-place 's|^vm.swappiness.*||' /usr/lib/tuned/profiles/*/*
+
+# Give KWin phenomenal cosmic power so it can do its job better; see
+# https://community.kde.org/Distributions/Packaging_Recommendations#KWin_package_configuration
+# Need to do it ourselves due to
+# https://gitlab.archlinux.org/pacman/pacman/-/work_items/320
+# TODO: remove once we stop outputting pkgbuilds in the packaging pipeline
+setcap 'cap_sys_nice=+ep' /usr/bin/kwin_wayland
+
+# Let System Monitor et al. monitor Intel GPUs; see
+# https://community.kde.org/Distributions/Packaging_Recommendations#Ksystemstats_package_configuration
+# Need to do it ourselves due to
+# https://gitlab.archlinux.org/pacman/pacman/-/work_items/320
+# TODO: remove once we stop outputting pkgbuilds in the packaging pipeline
+setcap 'cap_perfmon=+ep' /usr/lib/ksystemstats_intel_helper
+
+# Add a "command not found" handler for Bash. We have to modify the existing file because it
+# already exists, and we can't put this in /etc/profile or /etc/profile.d/ because for profile
+# items, only environment variables get inherited by non-login shells; shell functions don't.
+cat <<- EOF >> /etc/bash.bashrc
+
+command_not_found_handle () {
+    python3 /usr/lib/command-not-found-handler.py "\$1"
+}
+EOF
+
+# Configure plocate to index bind mounts (needed on BTRFS)
+# See: https://wiki.archlinux.org/title/Locate#Btrfs
+if [ -f /etc/updatedb.conf ]; then
+    sed -i 's/^PRUNE_BIND_MOUNTS = "yes"/PRUNE_BIND_MOUNTS = "no"/' /etc/updatedb.conf
+
+    # Keep the per-user home snapshots out of the index.
+    if grep -q '^PRUNENAMES' /etc/updatedb.conf; then
+        sed -i '/^PRUNENAMES/ s/"[[:space:]]*$/ .snapshots"/' /etc/updatedb.conf
+    else
+        echo 'PRUNENAMES = ".snapshots"' >> /etc/updatedb.conf
+    fi
+    grep '^PRUNENAMES' /etc/updatedb.conf | grep -q '\.snapshots' || exit 1
+fi
+
+# Configure systemd-sysupdate Appstream URL according to edition
+sed -i "s/%EDITION%/$KDE_LINUX_EDITION/" \
+    /usr/lib/sysupdate.d/50-root-x86-64-caibx.transfer \
+    /usr/lib/sysupdate.d/50-root-x86-64-erofs.transfer \
+    /usr/lib/sysupdate.d/60-esp.transfer
+
+# Clean up final remnants of the build process
+rm -rf \
+    /buildroot \
+    /.cache \

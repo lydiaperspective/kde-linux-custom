@@ -1,0 +1,82 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+# SPDX-FileCopyrightText: 2016 Jonathan Riddell <jr@jriddell.org>
+# SPDX-FileCopyrightText: 2017-2021 Harald Sitter <sitter@kde.org>
+
+set -eux
+
+if ! grep "kde-linux.live=1" /proc/cmdline; then
+    echo "kde-linux.live=1 not in cmdline"
+    exit 1
+fi
+
+# Resolve the canonical path of the device that actually booted
+BOOTED_ROOT=$(readlink --canonicalize /dev/gpt-auto-root)
+
+# Extract the partition label specifically from that booted device
+BOOTED_LABEL=$(lsblk -no PARTLABEL "$BOOTED_ROOT")
+
+# Verify if the booted device is indeed the KDE Linux Live medium
+if [ "$BOOTED_LABEL" != "KDELinuxLive" ]; then
+    echo "gpt-auto-root is not KDELinuxLive"
+    exit 1
+fi
+
+systemd-sysext refresh
+
+useradd --create-home --comment "Live User" live
+usermod --append --groups wheel live
+passwd --delete live
+
+# systemd is a bit unreliable with creating the file if the timezone is UTC, so make sure it's in place
+ln -s ../usr/share/zoneinfo/UTC /etc/localtime
+
+timedatectl set-timezone UTC
+localectl set-locale C.UTF-8
+
+cat << EOF >> /etc/plasmalogin.conf
+[Autologin]
+User=live
+Session=plasma.desktop
+Relogin=true
+EOF
+
+mkdir /home/live/.config/
+mkdir /home/live/Desktop/
+
+# Disable automatic screen locking
+cat << EOF > /home/live/.config/kscreenlockerrc
+[Daemon]
+Autolock=false
+LockOnResume=false
+Timeout=0
+EOF
+
+# No search indexing. Useless and eating away at already meh performance
+cat << EOF > /home/live/.config/baloofilerc
+[Basic Settings]
+Indexing-Enabled=false
+EOF
+
+cat << EOF > /home/live/.config/plasma-welcomerc
+[General]
+LiveEnvironment=true
+LiveInstaller=calamares
+EOF
+
+# No updates check for live session
+cat << EOF > /home/live/.config/PlasmaDiscoverUpdates
+[Global]
+RequiredNotificationInterval=-1
+EOF
+
+# KWallet is also useless in a live environment
+cat << EOF > /home/live/.config/kwalletrc
+[Wallet]
+Enabled=false
+EOF
+
+cp /usr/share/applications/calamares.desktop /home/live/Desktop/
+chmod +x /home/live/Desktop/calamares.desktop # without this there'd be a dialog asking if it really should execute
+
+chown -R live:live /home/live/

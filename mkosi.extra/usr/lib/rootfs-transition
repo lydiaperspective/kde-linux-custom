@@ -1,0 +1,50 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+# SPDX-FileCopyrightText: 2025 Harald Sitter <sitter@kde.org>
+
+set -eu
+
+. /etc/os-release
+
+if [ ! -b /dev/gpt-auto-root ]; then
+    echo "gpt-auto-root does not exist"
+    exit 1
+fi
+
+if [ -d /run/kde-linux-rootfs-transition ]; then
+    exit 0
+fi
+
+mkdir /run/kde-linux-rootfs-transition
+mount -o rw,subvol=/ /dev/gpt-auto-root /run/kde-linux-rootfs-transition
+
+# NOTE: this is required to be here!
+# It's a bit awkward but the system drive is not mounted yet, so we can only peek into it through our mount.
+# This is effectively the no-op condition that should be in the unit but can't be because we need the mount.
+# In a way we could think about moving the mounts into a generator TBH. Then we can do proper condition management on
+# the systemd side. Question is if they get correctly unmounted automatically.
+if [ -e /run/kde-linux-rootfs-transition/@system ]; then
+    # v2->v3: @system/home is a btrfs subvolume but should be a regular directory.
+    # home.v3old or home.v3tmp mean an earlier attempt was interrupted. In the worst case
+    # @system/home no longer exists and home.v3old holds the only copy of the user data, so
+    # the migrator has to run to put it back.
+    if btrfs subvolume show /run/kde-linux-rootfs-transition/@system/home >/dev/null 2>&1 \
+        || [ -e /run/kde-linux-rootfs-transition/@system/home.v3old ] \
+        || [ -e /run/kde-linux-rootfs-transition/@system/home.v3tmp ]; then
+        /usr/lib/btrfs-migrator /run/kde-linux-rootfs-transition
+        umount --recursive --lazy /run/kde-linux-rootfs-transition
+    else
+        cd /
+        umount --recursive --lazy /run/kde-linux-rootfs-transition
+    fi
+    exit 0
+fi
+
+if [ ! -e "/run/kde-linux-rootfs-transition/kde-linux_$IMAGE_VERSION.erofs" ]; then
+    echo "kde-linux_$IMAGE_VERSION.erofs does not exist on root partition. Aborting transition."
+    systemctl reboot
+    exit 1
+fi
+
+/usr/lib/btrfs-migrator /run/kde-linux-rootfs-transition
+umount --recursive --lazy /run/kde-linux-rootfs-transition

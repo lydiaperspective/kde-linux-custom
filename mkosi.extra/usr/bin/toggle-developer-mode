@@ -1,0 +1,65 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+# SPDX-FileCopyrightText: 2026 Nate Graham <nate@kde.org>
+
+# Turn "developer mode" on or off.
+
+set -e
+
+USR_APPS_LOCATION="/usr/share/applications/"
+OPT_APPS_LOCATION="/opt/local/share/applications/"
+PREINSTALLED_DEV_APPS="GammaRay.desktop \
+org.kde.heaptrack.desktop \
+org.kde.plasma.lookandfeelexplorer.desktop \
+org.kde.plasma.themeexplorer.desktop \
+org.kde.plasmaengineexplorer.desktop"
+
+enable_dev_apps()
+{
+    echo "Enabling development apps…"
+
+    # Heredoc into run0 so we only have one auth prompt.
+    run0 sh <<EOF
+set -e
+mkdir -p "$OPT_APPS_LOCATION" 1> /dev/null
+
+for ITEM in $PREINSTALLED_DEV_APPS; do
+    cp "${USR_APPS_LOCATION}\${ITEM}" "${OPT_APPS_LOCATION}\${ITEM}" 1> /dev/null
+    sed -i "/NoDisplay=true/d" "${OPT_APPS_LOCATION}\${ITEM}" 1> /dev/null
+    echo "- Enabled \${ITEM}"
+done
+EOF
+
+    echo "Refreshing app cache…"
+    kbuildsycoca6
+
+    echo "Done; development apps are now visible in the “Development” category of your launcher widget."
+    echo "files were installed in ${OPT_APPS_LOCATION}."
+}
+
+disable_dev_apps()
+{
+    echo "Hiding development apps…"
+
+    # Heredoc into run0 so we only have one auth prompt.
+    run0 sh <<EOF
+set -e
+for ITEM in $PREINSTALLED_DEV_APPS; do
+    rm "${OPT_APPS_LOCATION}\${ITEM}" 1> /dev/null
+done
+
+rmdir --ignore-fail-on-non-empty "$OPT_APPS_LOCATION" 1> /dev/null
+EOF
+
+    echo "Refreshing app cache…"
+    kbuildsycoca6
+
+    echo "Done; development apps are now hidden."
+}
+
+
+if [ -f "${OPT_APPS_LOCATION}GammaRay.desktop" ]; then
+    disable_dev_apps
+else
+    enable_dev_apps
+fi

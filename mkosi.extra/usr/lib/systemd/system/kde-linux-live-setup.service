@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+# SPDX-FileCopyrightText: 2023 Harald Sitter <sitter@kde.org>
+
+[Unit]
+Description=KDE Linux Live Session Setup
+Requires=systemd-logind.service
+Before=display-manager.service
+After=run-extensions-live.mount systemd-logind.service systemd-homed.service
+ConditionPathExists=/run/extensions/live/usr/lib/live-setup
+ConditionKernelCommandLine=kde-linux.live=1
+
+[Service]
+Type=oneshot
+ExecStart=/run/extensions/live/usr/lib/live-setup

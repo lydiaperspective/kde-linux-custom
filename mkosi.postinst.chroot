@@ -1,0 +1,197 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+# SPDX-FileCopyrightText: 2023 Harald Sitter <sitter@kde.org>
+
+set -ex
+
+env
+
+# Safety nets to prevent excessive breakage
+## the shim is unprivileged, run0 enforces the boundary
+[ -x /usr/bin/run0-sudo-shim ] || exit 1
+[ ! -u /usr/bin/run0-sudo-shim ] || exit 1
+[ -e /usr/bin/run0 ] || exit 1
+## newuidmap should have a capability set
+[ "$(getcap /usr/bin/newuidmap)" != "" ] || exit 1
+
+mkdir --mode 0700 /system # for the kde-linux-overlay.service
+
+export SYSTEMD_ESP_PATH="$BOOT_MNT"
+mkdir --mode 0700 "$SYSTEMD_ESP_PATH"
+bootctl install
+echo 'timeout 7' >> "$SYSTEMD_ESP_PATH/loader/loader.conf"
+
+# Meanwhile cleanup a bit
+
+# FIXME: needed by cxx-rust-cssparser; can't remove these for now
+# pacman --remove --noconfirm corrosion rust || true
+
+# Remove whatever is being pulled as a secret service provider
+# FIXME: find a way to not pull in a secret service provider to begin with
+pacman --remove --recursive --nosave --noconfirm --assume-installed org.freedesktop.secrets $(pacman --query --quiet org.freedesktop.secrets || true) || true
+
+# No Arch AppStream metadata in discover please! We don't want discover talking about pacman things.
+pacman --remove --recursive --nosave --noconfirm archlinux-appstream-data || true
+rm -rf /usr/share/swcatalog
+
+# Calamares
+cd /tmp
+git clone --depth 1 https://invent.kde.org/mirrors/calamares.git
+cmake -S calamares -B calamares/build -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=OFF -DWITH_QT6=ON
+cmake --build calamares/build "-j$(nproc)"
+DESTDIR=/live/ cmake --install calamares/build
+
+# Upstream shells out to pkexec; /opt/local/bin/calamares handles elevation instead.
+desktop-file-edit --set-key=Exec --set-value=calamares \
+    /live/usr/share/applications/calamares.desktop
+rm -f /live/usr/share/polkit-1/actions/*calamares*.policy
+grep -q '^Exec=calamares$' /live/usr/share/applications/calamares.desktop || exit 1
+
+cat <<- EOF > /usr/share/icons/default/index.theme
+[Icon Theme]
+Inherits=breeze_cursors
+EOF
+
+# IMAGE_VERSION is %Y%m%d%H%M and is exported by mkosi. Derive the readable
+# date from it here; passing it via mkosi's Environment= truncates at the
+# space because that setting is a space separated list of assignments.
+if [ "${#IMAGE_VERSION}" -ne 12 ]; then
+    echo "Unexpected IMAGE_VERSION '$IMAGE_VERSION'" >&2
+    exit 1
+fi
+VERSION_DATE="${IMAGE_VERSION:0:4}-${IMAGE_VERSION:4:2}-${IMAGE_VERSION:6:2} ${IMAGE_VERSION:8:2}:${IMAGE_VERSION:10:2}"
+
+# WARNING: only set up os-release after the build otherwise kde-build doesn't know how to handle the system currently
+cat <<- EOF > /usr/lib/os-release
+NAME="KDE Linux"
+PRETTY_NAME="KDE Linux"
+ID=kde-linux
+DEFAULT_HOSTNAME=kde-linux
+VERSION="$VERSION_DATE"
+VERSION_ID=$IMAGE_VERSION
+BUILD_ID=$CI_COMMIT_SHORT_SHA
+ANSI_COLOR="38;2;61;174;233"
+HOME_URL="https://linux.kde.org"
+DOCUMENTATION_URL="https://linux.kde.org/docs/"
+SUPPORT_URL="https://kde.org/support/"
+BUG_REPORT_URL="https://invent.kde.org/kde-linux/kde-linux/-/issues"
+PRIVACY_POLICY_URL="https://kde.org/privacypolicy-apps/"
+LOGO=/usr/share/pixmaps/kde-linux-logo.png
+IMAGE_ID=kde-linux
+IMAGE_VERSION=$IMAGE_VERSION
+# KDE Linux specific keys.
+KDE_LINUX_COMMIT_SHA=$CI_COMMIT_SHA
+KDE_LINUX_COMMIT_SHORT_SHA=$CI_COMMIT_SHORT_SHA
+KDE_LINUX_CI_URL=$CI_PIPELINE_URL
+KDE_LINUX_SYSUPDATE_ENDPOINT=sysupdate/v2
+EOF
+[ -f /usr/lib/os-release ] || false
+cat /usr/lib/os-release
+
+# Rename the packaged kde-mimeapps.list to mimeapps.list
+# This allows our kde-mimeapps.list to take precedence.
+mv -v /usr/share/applications/kde-mimeapps.list /usr/share/applications/mimeapps.list
+mv -v /usr/share/applications/kde-linux-mimeapps.list /usr/share/applications/kde-mimeapps.list
+
+download_flatpaks() {
+    flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    # Do this separately, when used as part of remote-add it complains about GPG for unknown reasons
+    flatpak remote-modify --collection-id=org.flathub.Stable flathub
+
+    # Setting "*" will let Flatpak download all languages at once
+    flatpak config --set languages "*"
+
+    kde_nightly=(
+        ark
+        gwenview
+        kcalc
+        keepsecret
+        haruna
+        okular
+        qrca
+    )
+
+    # Add Nightly repos
+    for app in "${kde_nightly[@]}"; do
+        flatpak remote-add --if-not-exists "${app}-nightly" \
+            "https://cdn.kde.org/flatpak/${app}-nightly/${app}-nightly.flatpakrepo"
+    done
+
+    # Flatpak ignores repo priorities, prompting for remote selection.
+    # Looping avoids this and keeps automation working.
+    # Issue: https://github.com/flatpak/flatpak/issues/5421
+    for app in "${kde_nightly[@]}"; do
+        flatpak install --or-update --noninteractive --assumeyes "${app}-nightly" "org.kde.${app}"
+    done
+
+    # Install KWrite from Flathub for now, until it has a nightly repo.
+    flatpak install --or-update --noninteractive --assumeyes flathub \
+        org.gtk.Gtk3theme.Breeze \
+        org.kde.kwrite \
+        org.mozilla.firefox \
+        org.fcitx.Fcitx5 \
+        org.fcitx.Fcitx5.Addon.ChineseAddons \
+        org.fcitx.Fcitx5.Addon.Chewing \
+        org.fcitx.Fcitx5.Addon.Mozc \
+        org.fcitx.Fcitx5.Addon.Hangul \
+        org.fcitx.Fcitx5.Addon.Unikey \
+
+    # And restore default
+    flatpak config --unset languages
+}
+download_flatpaks
+
+# Fetch latest distrobox config from the kde-linux-containers repo
+mkdir -p /usr/share/distrobox
+curl --output /usr/share/distrobox/distrobox.conf \
+  'https://invent.kde.org/api/v4/projects/19899/repository/files/distrobox.conf/raw'
+
+# Enable samba usershare
+cat <<- EOF >> /etc/samba/smb.conf
+[global]
+  usershare path = /var/lib/samba/usershares
+  usershare max shares = 100
+  usershare allow guests = yes
+  usershare owner only = yes
+EOF
+
+# Set default shell as zsh for new users
+sed -i 's%^SHELL=/usr/bin/bash%SHELL=/usr/bin/zsh%' /etc/default/useradd
+
+# Put new users in sambashare group
+sed -i 's%^GROUP=users%GROUP=users\nGROUPS=sambashare%' /etc/default/useradd
+
+# Our Plymouth Theme
+KEEP_THEME="breeze-bgrt"
+
+# Set default Plymouth Theme
+plymouth-set-default-theme "$KEEP_THEME"
+
+# Remove all other themes except KEEP_THEME, text, and details
+for theme in $(plymouth-set-default-theme --list); do
+    if [[ "$theme" != "$KEEP_THEME" && "$theme" != "text" && "$theme" != "details" ]]; then
+        theme_dir="/usr/share/plymouth/themes/$theme"
+        [[ -d "$theme_dir" ]] && rm -rf -- "$theme_dir"
+    fi
+done
+
+cd /tmp
+
+# Delete af_alg et al. kernel modules; they're dangerous and unused by anything
+# relevant except for iwd and non-default cryptsetup algorithms, neither of which
+# are used on KDE Linux. Also delete rxrpc, which is only used for the AF_RXRPC
+# socket protocol by AFS/kAFS clients, which are not used on KDE Linux.
+# See also:
+# - https://www.secwest.net/copyfail-mitigation
+# - https://news.ycombinator.com/item?id=47956312
+rm -rf \
+    /usr/lib/modules/*/kernel/crypto/af_alg.ko.zst \
+    /usr/lib/modules/*/kernel/crypto/algif_aead.ko.zst \
+    /usr/lib/modules/*/kernel/crypto/algif_hash.ko.zst \
+    /usr/lib/modules/*/kernel/crypto/algif_rng.ko.zst \
+    /usr/lib/modules/*/kernel/crypto/algif_skcipher.ko.zst \
+    /usr/lib/modules/*/kernel/net/rxrpc/rxrpc.ko.zst \
+    /usr/lib/modules/*/kernel/fs/afs/kafs.ko.zst
+
+/usr/lib/rebuild-efi
+mv -v ./*.efi /
