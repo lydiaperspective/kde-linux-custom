@@ -1,0 +1,24 @@
+name: Build image
+on:
+  workflow_dispatch:   # manual trigger from the Actions tab
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
+          df -h
+
+      - name: Build
+        run: ./build_docker.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kde-linux-custom-iso
+          path: mkosi.output/*.iso
+          retention-days: 3
