@@ -11,7 +11,7 @@ set -e
 # Store the absolute path the script is located in to $SCRIPT_DIR.
 SCRIPT_DIR="$(readlink --canonicalize "$(dirname "$0")")"
 
-CONTAINER_RUNTIME="docker"
+CONTAINER_RUNTIME="podman"
 MIRRORS_COUNTRY=""
 PARALLEL_DOWNLOADS=""
 
